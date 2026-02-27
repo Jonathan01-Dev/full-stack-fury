@@ -1,0 +1,9 @@
+# Environnement virtuel (trop lourd, inutile sur Git)
+venv/
+
+# Données privées (tes clés d'identité)
+data/keys/
+
+# Fichiers de cache Python
+__pycache__/
+*.pyc
