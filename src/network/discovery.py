@@ -8,6 +8,18 @@ from src.protocol.packet import pack_hello, unpack_packet
 MCAST_GRP = '239.255.42.99'
 MCAST_PORT = 6000
 
+def get_local_ip():
+    """Tente de trouver la vraie adresse IP locale (évite les interfaces temporelles comme WSL ou VirtualBox)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('10.255.255.255', 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return '0.0.0.0'
+
+
 class Discovery:
     def __init__(self, node_id, peer_table):
         self.node_id = node_id
@@ -23,6 +35,15 @@ class Discovery:
         
         # Activer le mode Broadcast (sécurité supplémentaire pour Windows)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+        # Forcer la sortie Multicast sur la bonne interface IP locale
+        local_ip = get_local_ip()
+        if local_ip != '0.0.0.0':
+            try:
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(local_ip))
+            except Exception:
+                pass
+
 
         while self.running:
             try:
@@ -50,7 +71,8 @@ class Discovery:
 
         # Configuration du groupe Multicast (Version corrigée pour Windows)
         # On utilise "4s4s" pour éviter les bugs de taille de structure
-        mreq = struct.pack("4s4s", socket.inet_aton(MCAST_GRP), socket.inet_aton("0.0.0.0"))
+        local_ip = get_local_ip()
+        mreq = struct.pack("4s4s", socket.inet_aton(MCAST_GRP), socket.inet_aton(local_ip))
         
         try:
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
