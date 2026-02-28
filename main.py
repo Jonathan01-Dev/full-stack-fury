@@ -1,177 +1,130 @@
-import threading
-import time
+import argparse
+import os
+import sys
+from dotenv import load_dotenv
 
-from src.crypto.keys import get_node_id
-from src.network.discovery import Discovery
-from src.network.file_transfer import FileTransfer
-from src.network.peer_table import PeerTable
-from src.network.secure_channel import SecureChannel
-from src.security.trust_store import TrustStore
+from src.node import ArchipelNode
+from src.ui.web_server import start_web_server
 
-
-def _maintenance_loop(table, trust_store, running_flag):
-    while running_flag["run"]:
-        table.clean()
-        # Keep trust store hot for future enrichment
-        time.sleep(5)
-
+load_dotenv()
 
 def _print_help():
-    print("\nCommandes:")
+    print("\nCommandes Archipel CLI :")
     print("  help                       Affiche l'aide")
-    print("  peers                      Liste les pairs actifs")
-    print("  ping <ip>                  Bootstrap direct vers une IP (sans multicast)")
-    print("  msg <id_prefix> <texte>    Envoie un message chiffre")
-    print("  offer <id_prefix> <path>   Propose un fichier a un pair")
-    print("  offers                     Liste les offres de fichiers recues")
-    print("  get <offer_id>             Telecharge un fichier offert")
-    print("  trust <id_prefix>          Marque un pair comme fiable")
-    print("  untrust <id_prefix>        Retire la confiance explicite")
-    print("  quit                       Arrete le noeud")
-
+    print("  peers                      Liste les pairs découverts")
+    print("  msg <node_id> <texte>      Envoie un message chiffré")
+    print("  send <node_id> <path>      Propose un fichier à un pair")
+    print("  receive                    Liste les offres de fichiers reçues")
+    print("  download <offer_id>        Télécharge un fichier offert")
+    print("  status                     État du nœud + stats réseau")
+    print("  trust <node_id>            Approuve un pair (Web of Trust)")
+    print("  untrust <node_id>          Retire la confiance explicite")
+    print("  ping <ip>                  Bootstrap direct vers une IP")
+    print("  /ask <question>            Interroge l'IA Gemini (@archipel-ai aussi)")
+    print("  quit                       Arrête le nœud")
 
 def main():
-    my_id = get_node_id()
-    print(f"Demarrage Archipel\nMon ID : {my_id}\n" + "-" * 30)
+    parser = argparse.ArgumentParser(description="Archipel P2P Node")
+    parser.add_argument("--port", type=int, default=6000, help="Port de base pour le nœud")
+    parser.add_argument("--web-port", type=int, default=5000, help="Port pour l'interface Web")
+    parser.add_argument("--no-ai", action="store_true", help="Désactive l'intégration Gemini AI")
+    args = parser.parse_args()
 
-    table = PeerTable()
-    trust_store = TrustStore()
-    disco = Discovery(my_id, table)
-    secure = SecureChannel(my_id, table, trust_store)
-    transfer = FileTransfer(my_id, secure)
-
-    running = {"run": True}
-    threads = [
-        threading.Thread(target=disco.broadcast, daemon=True),
-        threading.Thread(target=disco.listen, daemon=True),
-        threading.Thread(target=secure.listen, daemon=True),
-        threading.Thread(
-            target=_maintenance_loop, args=(table, trust_store, running), daemon=True
-        ),
-    ]
-    for t in threads:
-        t.start()
+    node = ArchipelNode(port=args.port, no_ai=args.no_ai)
+    
+    print(f"Démarrage Archipel\nMon ID : {node.my_id}\n" + "-" * 30)
+    
+    # Lancement du moteur P2P
+    node.start()
+    
+    # Lancement de l'interface Web (en arrière-plan)
+    start_web_server(node, port=args.web_port)
 
     _print_help()
+    
     try:
         while True:
-            raw = input("\narchipel> ").strip()
-            if not raw:
+            raw = input(f"\narchipel[{node.my_id[:8]}]> ").strip()
+            if not raw: continue
+            
+            # Gemini triggers
+            if raw.startswith("@archipel-ai") or raw.startswith("/ask"):
+                query = raw.replace("@archipel-ai", "").replace("/ask", "").strip()
+                if not query:
+                    print("Usage: /ask <question>")
+                    continue
+                print("[IA] Réflexion...")
+                print(f"[IA] Gemini: {node.gemini.query(query)}")
                 continue
+
             if raw == "help":
                 _print_help()
-                continue
-            if raw == "peers":
-                table.display()
-                continue
-            if raw.startswith("ping "):
-                parts = raw.split(" ", 1)
-                ip = parts[1].strip()
+            elif raw == "status":
+                s = node.get_status()
+                print("\n--- ÉTAT DU NŒUD ---")
+                print(f"ID : {s['id']}")
+                print(f"Port Discovery : {s['port_disco']}")
+                print(f"Port Sécurisé  : {s['port_secure']}")
+                print(f"Pairs Actifs   : {s['peers_count']}")
+                print(f"Confiance      : {s['trusted_count']} pairs")
+                print(f"IA Gemini      : {'ON' if s['ai_enabled'] else 'OFF'}")
+            elif raw == "peers":
+                node.table.display()
+            elif raw.startswith("ping "):
+                ip = raw.split(" ", 1)[1].strip()
                 try:
-                    disco.ping(ip)
-                    print(f"HELLO unicast envoye vers {ip}.")
-                except Exception as e:
-                    print(f"Echec ping: {e}")
-                continue
-            if raw == "quit":
+                    node.disco.ping(ip)
+                    print(f"HELLO unicast envoyé vers {ip}")
+                except Exception as e: print(f"Erreur: {e}")
+            elif raw == "quit":
                 break
-            if raw.startswith("msg "):
+            elif raw.startswith("msg "):
                 parts = raw.split(" ", 2)
-                if len(parts) < 3:
-                    print("Usage: msg <id_prefix> <texte>")
-                    continue
+                if len(parts) < 3: continue
                 try:
-                    peer_id = table.find_by_prefix(parts[1])
-                except ValueError as e:
-                    print(e)
-                    continue
-                if not peer_id:
-                    print("Pair introuvable.")
-                    continue
+                    peer_id = node.table.find_by_prefix(parts[1])
+                    if peer_id:
+                        node.secure.send_secure_message(peer_id, parts[2])
+                        print("Message envoyé.")
+                    else: print("Pair introuvable.")
+                except Exception as e: print(f"Erreur: {e}")
+            elif raw.startswith("trust "):
+                pid = raw.split(" ", 1)[1].strip()
                 try:
-                    secure.send_secure_message(peer_id, parts[2])
-                    print("Message envoye.")
-                except Exception as e:
-                    print(f"Echec envoi: {e}")
-                continue
-            if raw.startswith("trust "):
-                parts = raw.split(" ", 1)
-                try:
-                    peer_id = table.find_by_prefix(parts[1])
-                except ValueError as e:
-                    print(e)
-                    continue
-                if not peer_id:
-                    print("Pair introuvable.")
-                    continue
-                trust_store.set_trusted(peer_id, True)
-                print(f"Pair {peer_id[:10]}... marque fiable.")
-                continue
-            if raw.startswith("untrust "):
-                parts = raw.split(" ", 1)
-                try:
-                    peer_id = table.find_by_prefix(parts[1])
-                except ValueError as e:
-                    print(e)
-                    continue
-                if not peer_id:
-                    print("Pair introuvable.")
-                    continue
-                trust_store.set_trusted(peer_id, False)
-                print(f"Pair {peer_id[:10]}... marque non fiable.")
-                continue
-            if raw.startswith("offer "):
+                    peer_id = node.table.find_by_prefix(pid)
+                    if peer_id:
+                        node.trust_store.set_trusted(peer_id, True)
+                        print(f"Pair {peer_id[:10]}... marqué fiable.")
+                except Exception as e: print(f"Erreur: {e}")
+            elif raw.startswith("send "):
                 parts = raw.split(" ", 2)
-                if len(parts) < 3:
-                    print("Usage: offer <id_prefix> <path>")
-                    continue
+                if len(parts) < 3: continue
                 try:
-                    peer_id = table.find_by_prefix(parts[1])
-                except ValueError as e:
-                    print(e)
-                    continue
-                if not peer_id:
-                    print("Pair introuvable.")
-                    continue
+                    peer_id = node.table.find_by_prefix(parts[1])
+                    if peer_id:
+                        node.transfer.offer_file(peer_id, parts[2])
+                    else: print("Pair introuvable.")
+                except Exception as e: print(f"Erreur: {e}")
+            elif raw == "receive":
+                offers = node.transfer.list_remote_offers()
+                if not offers: print("Aucune offre.")
+                else:
+                    for o in offers:
+                        print(f"{o['offer_id']} | {o['file_name']} | {o['file_size']} o | from {o['owner'][:10]}...")
+            elif raw.startswith("download "):
+                oid = raw.split(" ", 1)[1].strip()
                 try:
-                    manifest = transfer.offer_file(peer_id, parts[2])
-                    print(
-                        f"Offre envoyee: {manifest['offer_id']} "
-                        f"({manifest['file_name']}, {manifest['total_chunks']} chunks)"
-                    )
-                except Exception as e:
-                    print(f"Echec offer: {e}")
-                continue
-            if raw == "offers":
-                offers = transfer.list_remote_offers()
-                if not offers:
-                    print("Aucune offre recue.")
-                    continue
-                print("\n--- OFFRES DISTANTES ---")
-                for o in offers:
-                    print(
-                        f"{o['offer_id']} | {o['file_name']} | {o['file_size']} o | "
-                        f"{o['total_chunks']} chunks | from {o['owner'][:10]}..."
-                    )
-                continue
-            if raw.startswith("get "):
-                parts = raw.split(" ", 1)
-                offer_id = parts[1].strip()
-                try:
-                    transfer.request_download(offer_id)
-                    print(f"Demande de telechargement envoyee pour {offer_id}.")
-                except Exception as e:
-                    print(f"Echec get: {e}")
-                continue
-            print("Commande inconnue. Tape 'help'.")
+                    node.transfer.request_download(oid)
+                    print(f"Téléchargement lancé pour {oid}")
+                except Exception as e: print(f"Erreur: {e}")
+            else:
+                print("Commande inconnue. Tape 'help'.")
+                
     except KeyboardInterrupt:
         pass
     finally:
-        running["run"] = False
-        disco.stop()
-        secure.stop()
-        print("\nArret du noeud.")
-
+        node.stop()
+        print("\nArrêt.")
 
 if __name__ == "__main__":
     main()
