@@ -1,23 +1,23 @@
 import socket
 import struct
-import threading
 import time
-from src.protocol.packet import pack_hello, unpack_packet
 
-# Configuration officielle du projet
-MCAST_GRP = '239.255.42.99'
+from src.protocol.packet import TYPE_HELLO, pack_hello, unpack_packet
+
+MCAST_GRP = "239.255.42.99"
 MCAST_PORT = 6000
 
+
 def get_local_ip():
-    """Tente de trouver la vraie adresse IP locale (évite les interfaces temporelles comme WSL ou VirtualBox)."""
+    """Try to detect the primary local interface."""
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('10.255.255.255', 1))
-        ip = s.getsockname()[0]
-        s.close()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("10.255.255.255", 1))
+        ip = sock.getsockname()[0]
+        sock.close()
         return ip
     except Exception:
-        return '0.0.0.0'
+        return "0.0.0.0"
 
 
 class Discovery:
@@ -25,80 +25,67 @@ class Discovery:
         self.node_id = node_id
         self.peer_table = peer_table
         self.running = True
+        self._dup_warned_ips = set()
 
     def broadcast(self):
-        """Envoie un signal HELLO toutes les 2 secondes (plus rapide pour vos tests)."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        
-        # TTL à 2 pour passer les petits routeurs/hotspots
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
-        
-        # Activer le mode Broadcast (sécurité supplémentaire pour Windows)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-        # Forcer la sortie Multicast sur la bonne interface IP locale
         local_ip = get_local_ip()
-        if local_ip != '0.0.0.0':
+        if local_ip != "0.0.0.0":
             try:
-                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(local_ip))
+                sock.setsockopt(
+                    socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(local_ip)
+                )
             except Exception:
                 pass
-
 
         while self.running:
             try:
                 packet = pack_hello(self.node_id)
-                
-                # 1. Envoi au groupe Multicast officiel
                 sock.sendto(packet, (MCAST_GRP, MCAST_PORT))
-                
-                # 2. Envoi en Broadcast général (pour forcer la détection si le Multicast est bloqué)
-                sock.sendto(packet, ('255.255.255.255', MCAST_PORT))
-                
-                time.sleep(2) # On envoie souvent pour le test
+                sock.sendto(packet, ("255.255.255.255", MCAST_PORT))
+                time.sleep(2)
             except Exception as e:
-                print(f"Erreur lors de l'envoi : {e}")
+                print(f"Erreur envoi HELLO: {e}")
 
     def listen(self):
-        """Écoute les HELLO des autres voisins."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        
-        # Permettre de relancer le script sans attendre que le port se libère
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
-        # Écouter sur toutes les interfaces réseau
-        sock.bind(('', MCAST_PORT))
+        sock.bind(("", MCAST_PORT))
 
-        # Configuration du groupe Multicast (Version corrigée pour Windows)
-        # On utilise "4s4s" pour éviter les bugs de taille de structure
         local_ip = get_local_ip()
         mreq = struct.pack("4s4s", socket.inet_aton(MCAST_GRP), socket.inet_aton(local_ip))
-        
         try:
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         except Exception as e:
-            print(f"⚠️ Multicast non supporté, passage en mode UDP standard : {e}")
+            print(f"Multicast indisponible, mode UDP simple: {e}")
 
-        print(f"👂 Écoute active sur le port {MCAST_PORT}...")
-
+        print(f"Ecoute discovery active sur {MCAST_PORT}...")
         while self.running:
             try:
                 data, addr = sock.recvfrom(1024)
-                
-                # On décode le paquet binaire
                 info = unpack_packet(data)
-                
-                if info and info["type"] == 0x01: # Si c'est un HELLO
-                    remote_id = info["payload"]
-                    
-                    # On ignore notre propre message
-                    if remote_id != self.node_id:
-                        # On met à jour la table des pairs avec l'IP de l'expéditeur
-                        self.peer_table.update(remote_id, addr[0])
-                        
+                if info and info["type"] == TYPE_HELLO:
+                    remote_id = info["payload"].decode("utf-8")
+                    if remote_id == self.node_id:
+                        # Typical when two machines share the same private.key.
+                        if (
+                            addr[0] not in ("127.0.0.1", "0.0.0.0")
+                            and addr[0] not in self._dup_warned_ips
+                        ):
+                            print(
+                                "\n[WARN] HELLO ignore: meme node_id detecte depuis "
+                                f"{addr[0]}. Verifie data/keys/private.key sur chaque PC."
+                            )
+                            self._dup_warned_ips.add(addr[0])
+                        continue
+
+                    self.peer_table.update(remote_id, addr[0])
             except Exception as e:
                 if self.running:
-                    print(f"Erreur réception : {e}")
+                    print(f"Erreur reception HELLO: {e}")
 
     def stop(self):
         self.running = False
