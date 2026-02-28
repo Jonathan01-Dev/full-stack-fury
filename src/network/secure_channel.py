@@ -27,17 +27,18 @@ FILE_CHUNK_HEADER_SIZE = struct.calcsize(FILE_CHUNK_HEADER)
 
 
 class SecureChannel:
-    def __init__(self, node_id, peer_table, trust_store):
+    def __init__(self, node_id, peer_table, trust_store, secure_port=SECURE_PORT):
         self.node_id = node_id
         self.peer_table = peer_table
         self.trust_store = trust_store
+        self.secure_port = secure_port
         self.running = True
 
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
-        self._socket.bind(("", SECURE_PORT))
+        self._socket.bind(("", self.secure_port))
 
         self._lock = threading.Lock()
         self._handlers = {}
@@ -72,13 +73,17 @@ class SecureChannel:
         return self.peer_table.get_peer(peer_id)
 
     def _send_handshake_init(self, peer_id, ip):
+        # On récupère le port distant depuis la peer_table
+        peer = self._peer_entry(peer_id)
+        remote_port = peer.get("port", self.secure_port) if peer else self.secure_port
+
         eph_priv, eph_pub = generate_ephemeral_keypair()
         payload = json.dumps({"from_id": self.node_id, "eph_pub": eph_pub.hex()}).encode(
             "utf-8"
         )
         with self._lock:
             self._pending[peer_id] = eph_priv
-        self._socket.sendto(pack_packet(TYPE_HANDSHAKE_INIT, payload), (ip, SECURE_PORT))
+        self._socket.sendto(pack_packet(TYPE_HANDSHAKE_INIT, payload), (ip, remote_port))
 
     def _ensure_session(self, peer_id, ip):
         with self._lock:
@@ -114,11 +119,16 @@ class SecureChannel:
         self._ensure_session(peer_id, ip)
         with self._lock:
             keys = self._sessions[peer_id]
+        
+        # Récupération du port distant
+        peer = self._peer_entry(peer_id)
+        remote_port = peer.get("port", self.secure_port) if peer else self.secure_port
+
         nonce, ciphertext, tag, mac = encrypt_payload(
             keys["enc_key"], keys["mac_key"], plaintext_bytes
         )
         payload = self._pack_secure_payload(nonce, tag, mac, ciphertext)
-        self._socket.sendto(pack_packet(TYPE_SECURE_MSG, payload), (ip, SECURE_PORT))
+        self._socket.sendto(pack_packet(TYPE_SECURE_MSG, payload), (ip, remote_port))
 
     def send_secure_object(self, peer_id, obj):
         peer = self._peer_entry(peer_id)
@@ -165,7 +175,7 @@ class SecureChannel:
         self._send_encrypted_payload(peer_id, ip, payload_bytes)
 
     def listen(self):
-        print(f"Canal securise actif sur le port {SECURE_PORT}...")
+        print(f"Canal securise actif sur le port {self.secure_port}...")
         while self.running:
             try:
                 data, addr = self._socket.recvfrom(65535)
@@ -229,10 +239,18 @@ class SecureChannel:
 
     def _dispatch_secure_object(self, peer_id, obj):
         kind = obj.get("kind")
+        handler = self._handlers.get(kind)
+        
         if kind == "chat":
             print(f"\n[MSG securise] {peer_id[:10]}... : {obj.get('text', '')}")
+            # Si un handler est enregistré (ex: pour l'UI), on l'appelle aussi
+            if handler:
+                try:
+                    handler(peer_id, obj)
+                except Exception:
+                    pass
             return
-        handler = self._handlers.get(kind)
+
         if not handler:
             print(f"\n[WARN] Type de message inconnu: {kind}")
             return

@@ -4,14 +4,14 @@ import time
 
 class PeerTable:
     def __init__(self):
-        self.peers = {}  # {node_id: {"ip": str, "last_seen": float}}
+        self.peers = {}  # {node_id: {"ip": str, "port": int, "last_seen": float}}
         self._lock = threading.Lock()
 
-    def update(self, node_id, ip):
+    def update(self, node_id, ip, port=6001):
         with self._lock:
             if node_id not in self.peers:
-                print(f"\n[+] Nouveau voisin : {node_id[:10]}... @ {ip}")
-            self.peers[node_id] = {"ip": ip, "last_seen": time.time()}
+                print(f"\n[+] Nouveau voisin : {node_id[:10]}... @ {ip}:{port}")
+            self.peers[node_id] = {"ip": ip, "port": port, "last_seen": time.time()}
 
     def clean(self):
         now = time.time()
@@ -32,7 +32,15 @@ class PeerTable:
                 return
             print("\n--- TABLE DES PAIRS ---")
             for nid, info in self.peers.items():
-                print(f"ID: {nid[:10]}... | IP: {info['ip']}")
+                print(f"ID: {nid[:10]}... | IP: {info['ip']}:{info['port']}")
+
+    def list_peers(self):
+        """Retourne la liste des pairs sous forme de dictionnaires pour l'UI."""
+        with self._lock:
+            return [
+                {"id": nid, "ip": info["ip"], "port": info.get("port", 6001), "last_seen": info["last_seen"]}
+                for nid, info in self.peers.items()
+            ]
 
     def find_by_prefix(self, prefix):
         with self._lock:
