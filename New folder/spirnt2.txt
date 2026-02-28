@@ -1,0 +1,362 @@
+
+sprint 2
+
+import socket
+import threading
+import os
+import sys
+
+class FileTransfer:
+    def __init__(self, port=6001, save_dir="data/shared"):
+        self.port = port
+        self.save_dir = save_dir
+        if not os.path.exists(self.save_dir):
+            os.makedirs(self.save_dir)
+
+    def start_server(self):
+        """Lance le serveur TCP pour recevoir les fichiers."""
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(('', self.port))
+        server.listen(5)
+        
+        while True:
+            client, addr = server.accept()
+            threading.Thread(target=self._handle_receive, args=(client, addr), daemon=True).start()
+
+    def _handle_receive(self, client_socket, addr):
+        try:
+            # 1. Lire l'en-tête (Nom | Taille)
+            header = client_socket.recv(1024).decode().strip()
+            if not header: return
+            
+            filename, filesize = header.split('|')
+            filesize = int(filesize)
+            print(f"\n[📥] Réception de : {filename} ({filesize} octets)")
+
+            # 2. Lire le contenu avec barre de progression
+            file_path = os.path.join(self.save_dir, filename)
+            received_bytes = 0
+            
+            with open(file_path, "wb") as f:
+                while received_bytes < filesize:
+                    chunk = client_socket.recv(4096)
+                    if not chunk: break
+                    f.write(chunk)
+                    received_bytes += len(chunk)
+                    self._draw_progress(received_bytes, filesize)
+            
+            print(f"\n✅ Terminé ! Sauvegardé dans {self.save_dir}")
+
+        except Exception as e:
+            print(f"\n❌ Erreur réception : {e}")
+        finally:
+            client_socket.close()
+
+    def send_file(self, target_ip, file_path):
+        """Envoie un fichier avec barre de progression."""
+        if not os.path.exists(file_path):
+            print(f"❌ Fichier introuvable.")
+            return
+
+        try:
+            filename = os.path.basename(file_path)
+            filesize = os.path.getsize(file_path)
+            client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client.connect((target_ip, self.port))
+
+            # 1. Envoyer l'en-tête (Format: Nom|Taille)
+            header = f"{filename}|{filesize}".ljust(1024)
+            client.send(header.encode())
+
+            # 2. Envoyer le contenu avec barre de progression
+            sent_bytes = 0
+            with open(file_path, "rb") as f:
+                print(f"📤 Envoi de {filename} à {target_ip}...")
+                while sent_bytes < filesize:
+                    data = f.read(4096)
+                    if not data: break
+                    client.sendall(data)
+                    sent_bytes += len(data)
+                    self._draw_progress(sent_bytes, filesize)
+            
+            print(f"\n✨ Envoi terminé !")
+            client.close()
+        except Exception as e:
+            print(f"\n❌ Échec de l'envoi : {e}")
+
+    def _draw_progress(self, current, total):
+        """Affiche une barre de progression simple dans la console."""
+        width = 40
+        percent = float(current) / total
+        filled = int(width * percent)
+        bar = "█" * filled + "-" * (width - filled)
+        sys.stdout.write(f"\r|{bar}| {percent:.1%}")
+        sys.stdout.flush()
+
+
+git add .
+
+git commit -m "feat: ajout du transfert TCP avec barre de progression"
+
+git push origin main
+
+Tes amis font : git pull origin main
+
+
+sprint 3
+
+2. Mise à jour de src/crypto/keys.py
+
+
+import os
+from nacl.signing import SigningKey, VerifyKey
+from nacl.encoding import HexEncoder
+from nacl.exceptions import BadSignatureError
+
+# Chemin vers la clé secrète
+KEY_PATH = "data/keys/private.key"
+
+def get_signing_key():
+    """Récupère l'objet SigningKey (Clé Privée) complet."""
+    if not os.path.exists(KEY_PATH):
+        # Créer le dossier si besoin
+        os.makedirs(os.path.dirname(KEY_PATH), exist_ok=True)
+        # Générer
+        sk = SigningKey.generate()
+        with open(KEY_PATH, "wb") as f:
+            f.write(bytes(sk))
+        return sk
+    
+    with open(KEY_PATH, "rb") as f:
+        return SigningKey(f.read())
+
+def get_node_id():
+    """Retourne l'ID du nœud (Clé publique en Hex)."""
+    sk = get_signing_key()
+    vk = sk.verify_key
+    return vk.encode(encoder=HexEncoder).decode('utf-8')
+
+# --- NOUVELLES FONCTIONS SPRINT 3 ---
+
+def sign_file(file_data):
+    """
+    Signe le contenu d'un fichier avec la clé privée du nœud.
+    Retourne la signature en format hexadécimal.
+    """
+    sk = get_signing_key()
+    signature = sk.sign(file_data).signature
+    return signature.hex()
+
+def verify_file(file_data, signature_hex, sender_public_key_hex):
+    """
+    Vérifie si un fichier a bien été signé par l'expéditeur.
+    sender_public_key_hex est l'ID du nœud qui a envoyé le fichier.
+    """
+    try:
+        # Reconstruire la clé de vérification à partir de l'ID hexadécimal
+        vk = VerifyKey(sender_public_key_hex, encoder=HexEncoder)
+        # Vérifier (lève une erreur si la signature est fausse)
+        vk.verify(file_data, bytes.fromhex(signature_hex))
+        return True
+    except (BadSignatureError, Exception):
+        return False
+
+if __name__ == "__main__":
+    print(f"Mon identifiant Archipel est : {get_node_id()}")
+
+src/network/transfer.py (Version Finale - Sprint 3)
+
+import socket
+import threading
+import os
+import sys
+from src.crypto.keys import sign_file, verify_file
+
+class FileTransfer:
+    def __init__(self, port=6001, save_dir="data/shared"):
+        self.port = port
+        self.save_dir = save_dir
+        if not os.path.exists(self.save_dir):
+            os.makedirs(self.save_dir)
+
+    def start_server(self):
+        """Lance le serveur TCP pour recevoir et vérifier les fichiers."""
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(('', self.port))
+        server.listen(5)
+        
+        while True:
+            client, addr = server.accept()
+            threading.Thread(target=self._handle_receive, args=(client, addr), daemon=True).start()
+
+    def _handle_receive(self, client_socket, addr):
+        try:
+            # 1. Lire l'en-tête (Format: Nom|Taille|Signature|ID_Expéditeur)
+            header = client_socket.recv(2048).decode().strip()
+            if not header: return
+            
+            filename, filesize, signature_hex, sender_id = header.split('|')
+            filesize = int(filesize)
+            
+            print(f"\n[📥] Réception de : {filename} ({filesize} octets)")
+            print(f"[🛡️] Origine déclarée : {sender_id[:10]}...")
+
+            # 2. Lire le contenu du fichier
+            file_data = b""
+            received_bytes = 0
+            while received_bytes < filesize:
+                chunk = client_socket.recv(4096)
+                if not chunk: break
+                file_data += chunk
+                received_bytes += len(chunk)
+                self._draw_progress(received_bytes, filesize)
+
+            # 3. VERIFICATION SPRINT 3 : Est-ce que le fichier est authentique ?
+            if verify_file(file_data, signature_hex, sender_id):
+                file_path = os.path.join(self.save_dir, filename)
+                with open(file_path, "wb") as f:
+                    f.write(file_data)
+                print(f"\n✅ AUTHENTIQUE : Fichier signé par l'expéditeur et sauvegardé.")
+            else:
+                print(f"\n❌ ALERTE SÉCURITÉ : La signature est invalide ! Fichier rejeté.")
+
+        except Exception as e:
+            print(f"\n❌ Erreur réception : {e}")
+        finally:
+            client_socket.close()
+
+    def send_file(self, target_ip, file_path, my_id):
+        """Signe et envoie un fichier à un pair."""
+        if not os.path.exists(file_path):
+            print(f"❌ Fichier introuvable.")
+            return
+
+        try:
+            filename = os.path.basename(file_path)
+            with open(file_path, "rb") as f:
+                file_data = f.read()
+            
+            filesize = len(file_data)
+            
+            # SPRINT 3 : Signer les données du fichier
+            print(f"[✍️] Signature du fichier en cours...")
+            signature_hex = sign_file(file_data)
+
+            client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client.connect((target_ip, self.port))
+
+            # 1. Envoyer l'en-tête enrichi (Nom|Taille|Signature|ID)
+            header = f"{filename}|{filesize}|{signature_hex}|{my_id}".ljust(2048)
+            client.send(header.encode())
+
+            # 2. Envoyer le contenu
+            sent_bytes = 0
+            print(f"📤 Envoi de {filename} à {target_ip}...")
+            client.sendall(file_data) # On envoie tout car on l'a déjà en mémoire
+            self._draw_progress(filesize, filesize)
+            
+            print(f"\n✨ Envoi terminé et sécurisé !")
+            client.close()
+        except Exception as e:
+            print(f"\n❌ Échec de l'envoi : {e}")
+
+    def _draw_progress(self, current, total):
+        width = 40
+        percent = float(current) / total
+        filled = int(width * percent)
+        bar = "█" * filled + "-" * (width - filled)
+        sys.stdout.write(f"\r|{bar}| {percent:.1%}")
+        sys.stdout.flush()
+
+
+
+mise à jour du fichier main.py
+
+import threading
+import time
+import sys
+import os
+from src.crypto.keys import get_node_id
+from src.network.peer_table import PeerTable
+from src.network.discovery import Discovery
+from src.network.transfer import FileTransfer 
+
+def main():
+    # 1. Obtenir l'identité (Clé Publique Hex)
+    my_id = get_node_id()
+    
+    # Nettoyage de la console pour un démarrage propre
+    os.system('cls' if os.name == 'nt' else 'clear')
+    
+    print(f"🚀 SYSTÈME ARCHIPEL : ACTIVÉ")
+    print(f"ID Local : {my_id}")
+    print(f"Statut   : Sécurisé (Sprint 3 - Signature Numérique)")
+    print("-" * 50)
+
+    # 2. Initialiser les modules
+    table = PeerTable()
+    disco = Discovery(my_id, table)
+    transfer = FileTransfer()
+
+    # 3. Lancer les threads réseau
+    # Thread 1 : Broadcast UDP (Annonce de présence)
+    threading.Thread(target=disco.broadcast, daemon=True).start()
+    
+    # Thread 2 : Listen UDP (Découverte des pairs)
+    threading.Thread(target=disco.listen, daemon=True).start()
+    
+    # Thread 3 : Serveur TCP (Réception sécurisée)
+    threading.Thread(target=transfer.start_server, daemon=True).start()
+
+    print("📡 Services de découverte et de transfert en ligne.")
+
+    # 4. Boucle d'interaction
+    try:
+        while True:
+            print("\n" + "="*20 + " MENU " + "="*20)
+            print("[1] Afficher la table des pairs (Voisins)")
+            print("[2] Envoyer un fichier signé")
+            print("[Q] Quitter le réseau")
+            
+            choix = input("\nAction > ").upper()
+
+            if choix == "1":
+                table.clean()
+                table.display()
+            
+            elif choix == "2":
+                # Affichage rapide des cibles disponibles
+                table.clean()
+                if not table.peers:
+                    print("⚠️ Aucun voisin détecté. Attendez un peu ou vérifiez le Wi-Fi.")
+                    continue
+                
+                print("\nVoisins disponibles :")
+                for peer_id, info in table.peers.items():
+                    print(f" - {info['ip']} (ID: {peer_id[:10]}...)")
+                
+                target_ip = input("\nIP du destinataire : ")
+                path = input("Chemin du fichier (ex: test.txt) : ")
+                
+                # SPRINT 3 : On passe l'ID pour que le destinataire puisse nous identifier
+                transfer.send_file(target_ip, path, my_id)
+            
+            elif choix == "Q":
+                print("Déconnexion...")
+                break
+            
+            else:
+                print("Option invalide.")
+            
+            time.sleep(0.5)
+
+    except KeyboardInterrupt:
+        print("\nArrêt forcé par l'utilisateur.")
+    finally:
+        print("👋 Au revoir !")
+        sys.exit()
+
+if __name__ == "__main__":
+    main()
