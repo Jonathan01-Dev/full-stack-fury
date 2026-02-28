@@ -1,43 +1,40 @@
 import os
 
 from nacl.encoding import HexEncoder
-from nacl.exceptions import BadSignatureError
-from nacl.signing import SigningKey, VerifyKey
+from nacl.signing import SigningKey
 
 KEY_PATH = "data/keys/private.key"
 
 
-def get_signing_key():
-    if not os.path.exists(KEY_PATH):
-        os.makedirs(os.path.dirname(KEY_PATH), exist_ok=True)
+def get_node_id():
+    """
+    Genere une identite locale (cle privee) ou recharge celle existante.
+    Retourne la cle publique (Node ID) en hexadecimal.
+    """
+    dir_name = os.path.dirname(KEY_PATH)
+    if not os.path.exists(dir_name):
+        os.makedirs(dir_name, exist_ok=True)
+
+    if os.path.exists(KEY_PATH):
+        try:
+            with open(KEY_PATH, "rb") as f:
+                seed = f.read()
+            signing_key = SigningKey(seed)
+            print("Identite existante chargee.")
+        except Exception as e:
+            print(f"Erreur lecture cle: {e}. Nouvelle cle creee.")
+            signing_key = SigningKey.generate()
+            with open(KEY_PATH, "wb") as f:
+                f.write(bytes(signing_key))
+    else:
         signing_key = SigningKey.generate()
         with open(KEY_PATH, "wb") as f:
             f.write(bytes(signing_key))
-        return signing_key
+        print("Nouvelle identite generee et sauvegardee.")
 
-    with open(KEY_PATH, "rb") as f:
-        return SigningKey(f.read())
-
-
-def get_node_id():
-    signing_key = get_signing_key()
     verify_key = signing_key.verify_key
-    return verify_key.encode(encoder=HexEncoder).decode("utf-8")
-
-
-def sign_file(file_data):
-    signing_key = get_signing_key()
-    signature = signing_key.sign(file_data).signature
-    return signature.hex()
-
-
-def verify_file(file_data, signature_hex, sender_public_key_hex):
-    try:
-        verify_key = VerifyKey(sender_public_key_hex, encoder=HexEncoder)
-        verify_key.verify(file_data, bytes.fromhex(signature_hex))
-        return True
-    except (BadSignatureError, Exception):
-        return False
+    node_id = verify_key.encode(encoder=HexEncoder).decode("utf-8")
+    return node_id
 
 
 if __name__ == "__main__":

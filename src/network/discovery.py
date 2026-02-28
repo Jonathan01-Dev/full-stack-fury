@@ -25,6 +25,7 @@ class Discovery:
         self.node_id = node_id
         self.peer_table = peer_table
         self.running = True
+        self._last_reply = {}  # ip -> timestamp
         self._dup_warned_ips = set()
 
     def broadcast(self):
@@ -49,6 +50,19 @@ class Discovery:
                 time.sleep(2)
             except Exception as e:
                 print(f"Erreur envoi HELLO: {e}")
+
+    def ping(self, ip):
+        """Bootstrap direct P2P sans multicast: envoi un HELLO unicast vers une IP."""
+        try:
+            socket.inet_aton(ip)
+        except OSError:
+            raise ValueError("IP invalide")
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        try:
+            sock.sendto(pack_hello(self.node_id), (ip, MCAST_PORT))
+        finally:
+            sock.close()
 
     def listen(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
@@ -82,7 +96,13 @@ class Discovery:
                             self._dup_warned_ips.add(addr[0])
                         continue
 
+                    now = time.time()
+                    prev = self._last_reply.get(addr[0], 0)
                     self.peer_table.update(remote_id, addr[0])
+                    # Ack unicast de courtoisie pour bootstrap bilateral sans serveur central.
+                    if now - prev > 10:
+                        sock.sendto(pack_hello(self.node_id), (addr[0], MCAST_PORT))
+                        self._last_reply[addr[0]] = now
             except Exception as e:
                 if self.running:
                     print(f"Erreur reception HELLO: {e}")
