@@ -50,7 +50,7 @@ class Discovery:
                 packet = pack_hello(msg)
                 sock.sendto(packet, (MCAST_GRP, self.mcast_port))
                 sock.sendto(packet, ("255.255.255.255", self.mcast_port))
-                time.sleep(2)
+                time.sleep(30)
             except Exception as e:
                 print(f"Erreur envoi HELLO: {e}")
 
